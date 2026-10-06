@@ -1,0 +1,31 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+
+# Models
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Dataset caches
+.cache/
+data/raw/
+data/cache/
+
+# Training outputs
+outputs/
+checkpoints/
+
+# Logs
+logs/
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
