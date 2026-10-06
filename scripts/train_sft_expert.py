@@ -364,18 +364,33 @@ def main():
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=training_config.get('per_device_train_batch_size', 4),
-        gradient_accumulation_steps=training_config.get('gradient_accumulation_steps', 2),
+
+        per_device_train_batch_size=training_config.get(
+            'per_device_train_batch_size', 4
+        ),
+        gradient_accumulation_steps=training_config.get(
+            'gradient_accumulation_steps', 2
+        ),
+
         warmup_steps=training_config.get('warmup_steps', 10),
         max_steps=training_config.get('max_steps', 100),
         learning_rate=training_config.get('learning_rate', 1e-4),
+
         fp16=training_config.get('fp16', True),
+
         logging_steps=training_config.get('logging_steps', 5),
-        save_steps=training_config.get('save_steps', 20),
+
+        # IMPORTANT
+        eval_strategy="steps",
         eval_steps=training_config.get('eval_steps', 20),
+
+        save_strategy="steps",
+        save_steps=training_config.get('save_steps', 20),
+
         report_to=training_config.get('report_to', "none"),
         seed=seed,
-        load_best_model_at_end=True,  # Load best model at end
+
+        load_best_model_at_end=True,
     )
 
     # Initialize the Trainer
