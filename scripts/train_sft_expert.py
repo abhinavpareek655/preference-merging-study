@@ -124,6 +124,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train SFT expert with LoRA")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument("--dry-run", action="store_true", help="Only load data and show examples, do not train")
+    parser.add_argument("--smoke-test", action="store_true", help="Run a quick smoke test with reduced dataset size and steps")
     args = parser.parse_args()
 
     # Load config
@@ -140,6 +141,16 @@ def main():
     dataset_config = config.get('dataset', {})
     lora_config = config.get('lora', {})
     training_config = config.get('training', {})
+
+    # Apply smoke-test settings if requested
+    if args.smoke_test:
+        print("Running in smoke-test mode: reducing dataset size and training steps")
+        dataset_config['subset_size'] = 100
+        training_config['max_steps'] = 20
+        # Also reduce logging and save frequency for smoke test
+        training_config['logging_steps'] = 2
+        training_config['save_steps'] = 5
+        training_config['eval_steps'] = 5
 
     model_name = model_config.get('name', "Qwen/Qwen2.5-0.5B-Instruct")
     dataset_name = dataset_config.get('name')
@@ -245,7 +256,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
-        torch_dtype=torch.float16,  # Use float16 to save memory
+        # torch_dtype will be set by TrainingArguments if fp16 is enabled
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -360,9 +371,7 @@ def main():
         learning_rate=training_config.get('learning_rate', 1e-4),
         fp16=training_config.get('fp16', True),
         logging_steps=training_config.get('logging_steps', 5),
-        save_strategy=training_config.get('save_strategy', "steps"),
         save_steps=training_config.get('save_steps', 20),
-        evaluation_strategy=training_config.get('evaluation_strategy', "steps"),
         eval_steps=training_config.get('eval_steps', 20),
         report_to=training_config.get('report_to', "none"),
         seed=seed,
