@@ -1,0 +1,22 @@
+model:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  revision: "main"
+
+project:
+  name: "preference-merging-study"
+
+training:
+  seed: 42
+
+experts:
+  math:
+    type: "sft"
+
+  code:
+    type: "sft"
+
+  instruction:
+    type: "sft"
+
+  preference:
+    type: "dpo"
