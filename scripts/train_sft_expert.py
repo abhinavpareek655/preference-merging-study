@@ -374,7 +374,7 @@ def main():
 
         warmup_steps=training_config.get('warmup_steps', 10),
         max_steps=training_config.get('max_steps', 100),
-        learning_rate=training_config.get('learning_rate', 1e-4),
+        learning_rate=float(training_config.get('learning_rate', 1e-4)),
 
         fp16=training_config.get('fp16', True),
 
