@@ -1,110 +1,66 @@
-"""
-Instruction dataset loader for HuggingFaceH4/Bespoke-Stratos-17k
-Loads and formats the dataset for SFT training using Qwen chat template.
-"""
+"""Dataset loader for HuggingFaceH4/Bespoke-Stratos-17k."""
 
 from datasets import load_dataset
-from typing import Dict, List
-import random
-
-
-def load_instruction_dataset(
-    dataset_name: str = "HuggingFaceH4/Bespoke-Stratos-17k",
-    split: str = "train",
-    subset_size: int = 2000,
-    seed: int = 42,
-) -> List[Dict[str, str]]:
-    """
-    Load and format the Bespoke-Stratos-17k dataset.
-
-    Args:
-        dataset_name: Name of the dataset on Hugging Face Hub
-        split: Dataset split to load (typically "train")
-        subset_size: Number of examples to sample
-        seed: Random seed for deterministic sampling
-
-    Returns:
-        List of formatted examples with keys: instruction, input, output
-    """
-    # Load the dataset
-    dataset = load_dataset(dataset_name, split=split)
-
-    # Deterministically sample subset
-    if subset_size < len(dataset):
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        selected_indices = indices[:subset_size]
-        dataset = dataset.select(selected_indices)
-
-    # Format examples
-    formatted_examples = []
-    for example in dataset:
-        # Extract prompt and response from Bespoke-Stratos-17k
-        prompt = example.get("prompt", "")
-        response = example.get("response", "")
-
-        if prompt and response:
-            formatted_examples.append({
-                "instruction": prompt,
-                "input": "",  # No separate input for instruction following
-                "output": response,
-            })
-
-    return formatted_examples
 
 
 def load_instruction_dataset_with_validation(
-    dataset_name: str = "HuggingFaceH4/Bespoke-Stratos-17k",
+    dataset_name: str,
     split: str = "train",
     subset_size: int = 2000,
     validation_split: float = 0.1,
     seed: int = 42,
-) -> tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    """
-    Load instruction dataset and split into train/validation sets.
+):
+    """Load Bespoke-Stratos-17k and normalize it to instruction/input/output.
 
-    Args:
-        dataset_name: Name of the dataset on Hugging Face Hub
-        split: Dataset split to load (typically "train")
-        subset_size: Total number of examples to sample
-        validation_split: Fraction of data to use for validation
-        seed: Random seed for deterministic sampling
-
-    Returns:
-        Tuple of (train_examples, validation_examples)
+    The HuggingFaceH4 version exposes `messages` and `conversations`.
+    We use the first user message as the instruction and the first assistant
+    message as the target output.
     """
-    # Load the dataset
     dataset = load_dataset(dataset_name, split=split)
+    dataset = dataset.shuffle(seed=seed)
 
-    # Deterministically sample subset
-    if subset_size < len(dataset):
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        selected_indices = indices[:subset_size]
-        dataset = dataset.select(selected_indices)
+    selected_size = min(subset_size, len(dataset))
+    dataset = dataset.select(range(selected_size))
 
-    # Format examples
-    formatted_examples = []
-    for example in dataset:
-        prompt = example.get("prompt", "")
-        response = example.get("response", "")
+    if selected_size == 0:
+        return [], []
 
-        if prompt and response:
-            formatted_examples.append({
-                "instruction": prompt,
-                "input": "",
-                "output": response,
-            })
+    split_dataset = dataset.train_test_split(
+        test_size=validation_split,
+        seed=seed,
+    )
 
-    # Split into train/validation
-    val_size = int(len(formatted_examples) * validation_split)
-    train_size = len(formatted_examples) - val_size
+    def convert(example):
+        instruction = ""
+        output = ""
 
-    # Deterministic shuffle for train/val split
-    indices = list(range(len(formatted_examples)))
-    random.Random(seed).shuffle(indices)
+        for message in example.get("messages") or []:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if role == "user" and not instruction:
+                instruction = content
+            elif role == "assistant" and not output:
+                output = content
 
-    train_examples = [formatted_examples[i] for i in indices[:train_size]]
-    val_examples = [formatted_examples[i] for i in indices[train_size:]]
+        if not instruction or not output:
+            for message in example.get("conversations") or []:
+                role = message.get("from", "")
+                content = message.get("value", "")
+                if role == "user" and not instruction:
+                    instruction = content
+                elif role in ("assistant", "gpt") and not output:
+                    output = content
+
+        return {
+            "instruction": instruction,
+            "input": "",
+            "output": output,
+        }
+
+    def valid(example):
+        return bool(example["instruction"].strip()) and bool(example["output"].strip())
+
+    train_examples = [x for x in map(convert, split_dataset["train"]) if valid(x)]
+    val_examples = [x for x in map(convert, split_dataset["test"]) if valid(x)]
 
     return train_examples, val_examples

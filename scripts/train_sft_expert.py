@@ -24,6 +24,77 @@ from data.code_dataset import load_code_dataset_with_validation
 from data.instruction_dataset import load_instruction_dataset_with_validation
 
 
+def load_instruction_dataset_direct(dataset_name: str, split: str, subset_size: int,
+                                    validation_split: float, seed: int):
+    """Load Bespoke-Stratos-17k directly from its TRL-compatible schema.
+
+    The dataset contains `system`, `conversations`, and `messages` fields.
+    We use the user message as the instruction and the assistant message as
+    the target output.
+    """
+    from datasets import load_dataset
+
+    dataset = load_dataset(dataset_name, split=split)
+
+    # Shuffle deterministically, then cap the requested number of examples.
+    dataset = dataset.shuffle(seed=seed)
+    selected_size = min(subset_size, len(dataset))
+    dataset = dataset.select(range(selected_size))
+
+    if selected_size == 0:
+        return [], []
+
+    # Create a deterministic 90/10 train/validation split.
+    split_dataset = dataset.train_test_split(
+        test_size=validation_split,
+        seed=seed,
+    )
+
+    def convert(example):
+        messages = example.get("messages") or []
+
+        instruction = ""
+        output = ""
+
+        for message in messages:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if role == "user" and not instruction:
+                instruction = content
+            elif role == "assistant" and not output:
+                output = content
+
+        # Fallback to the older `conversations` representation if needed.
+        if not instruction or not output:
+            conversations = example.get("conversations") or []
+            for message in conversations:
+                role = message.get("from", "")
+                content = message.get("value", "")
+                if role == "user" and not instruction:
+                    instruction = content
+                elif role in ("assistant", "gpt") and not output:
+                    output = content
+
+        return {
+            "instruction": instruction,
+            "input": "",
+            "output": output,
+        }
+
+    train_examples = [
+        convert(example)
+        for example in split_dataset["train"]
+        if convert(example)["instruction"] and convert(example)["output"]
+    ]
+    val_examples = [
+        convert(example)
+        for example in split_dataset["test"]
+        if convert(example)["instruction"] and convert(example)["output"]
+    ]
+
+    return train_examples, val_examples
+
+
 def set_seed(seed: int):
     """Set seed for reproducibility."""
     random.seed(seed)
@@ -99,16 +170,35 @@ def main():
     if args.dry_run:
         # For dry-run, we only need to load the dataset and show examples
         print(f"Loading dataset: {dataset_name}")
-        loader = get_dataset_loader(expert_type)
-        train_examples, val_examples = loader(
-            dataset_name=dataset_name,
-            split=dataset_split,
-            subset_size=subset_size,
-            validation_split=0.1,  # 10% for validation
-            seed=seed,
-        )
+        if expert_type == "instruction":
+            # Bespoke-Stratos-17k has a conversations/messages schema, so
+            # load it directly instead of relying on the older generic loader.
+            train_examples, val_examples = load_instruction_dataset_direct(
+                dataset_name=dataset_name,
+                split=dataset_split,
+                subset_size=subset_size,
+                validation_split=0.1,
+                seed=seed,
+            )
+        else:
+            loader = get_dataset_loader(expert_type)
+            train_examples, val_examples = loader(
+                dataset_name=dataset_name,
+                split=dataset_split,
+                subset_size=subset_size,
+                validation_split=0.1,
+                seed=seed,
+            )
 
-        print(f"Loaded {len(train_examples)} training examples and {len(val_examples)} validation examples.")
+        actual_total = len(train_examples) + len(val_examples)
+        print(
+            f"Requested up to {subset_size} examples; "
+            f"selected {actual_total} usable examples."
+        )
+        print(
+            f"Loaded {len(train_examples)} training examples and "
+            f"{len(val_examples)} validation examples."
+        )
 
         print("\n=== DRY RUN ===")
         print("Showing first 3 training examples:")
@@ -127,6 +217,11 @@ def main():
             print(f"  Output: {val_examples[i]['output']}")
             print()
 
+        if len(train_examples) == 0 or len(val_examples) == 0:
+            print("\nDRY RUN FAILED: one or more splits contain zero usable examples.")
+            raise SystemExit(1)
+
+        print("\nDRY RUN PASSED: dataset contains usable train and validation examples.")
         print("Dry run completed. Exiting.")
         return
 
@@ -172,16 +267,39 @@ def main():
 
     # Load dataset
     print(f"Loading dataset: {dataset_name}")
-    loader = get_dataset_loader(expert_type)
-    train_examples, val_examples = loader(
-        dataset_name=dataset_name,
-        split=dataset_split,
-        subset_size=subset_size,
-        validation_split=0.1,  # 10% for validation
-        seed=seed,
-    )
+    if expert_type == "instruction":
+        train_examples, val_examples = load_instruction_dataset_direct(
+            dataset_name=dataset_name,
+            split=dataset_split,
+            subset_size=subset_size,
+            validation_split=0.1,
+            seed=seed,
+        )
+    else:
+        loader = get_dataset_loader(expert_type)
+        train_examples, val_examples = loader(
+            dataset_name=dataset_name,
+            split=dataset_split,
+            subset_size=subset_size,
+            validation_split=0.1,
+            seed=seed,
+        )
 
-    print(f"Loaded {len(train_examples)} training examples and {len(val_examples)} validation examples.")
+    if len(train_examples) == 0 or len(val_examples) == 0:
+        raise RuntimeError(
+            f"Dataset loading failed: {len(train_examples)} train, "
+            f"{len(val_examples)} validation examples."
+        )
+
+    actual_total = len(train_examples) + len(val_examples)
+    print(
+        f"Requested up to {subset_size} examples; "
+        f"selected {actual_total} usable examples."
+    )
+    print(
+        f"Loaded {len(train_examples)} training examples and "
+        f"{len(val_examples)} validation examples."
+    )
 
     # Format examples
     def format_example(example, tokenizer):
