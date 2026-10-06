@@ -284,8 +284,8 @@ def main() -> None:
             dpo_config.get("max_length", 512)
         ),
 
-        max_prompt_length=int(
-            dpo_config.get("max_prompt_length", 256)
+        max_length=int(
+            dpo_config.get("max_length", 256)
         ),
 
         # Training batch
