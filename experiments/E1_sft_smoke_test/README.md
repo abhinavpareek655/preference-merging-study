@@ -47,3 +47,12 @@ The script will:
 ## Files Generated
 - `./e1_smoke_test_output`: Training output directory (checkpoints, etc.) - note: we set save_strategy="no" so no checkpoints are saved during training.
 - `./e1_smoke_test_lora_adapter`: Directory containing the saved LoRA adapter weights.
+
+## Related Experts
+
+The smoke test (E1) validates the training pipeline for the following SFT experts:
+- E_math: Supervised fine-tuning on OpenR1-Math-220k (2,000 examples)
+- E_code: Supervised fine-tuning on MBPP (2,000 training examples)
+- E_instruction: Supervised fine-tuning on Bespoke-Stratos-17k (2,000 examples)
+
+Each expert uses the same LoRA configuration as E1 (r=8, q_proj/v_proj) and is trained with the reusable script `scripts/train_sft_expert.py`.
