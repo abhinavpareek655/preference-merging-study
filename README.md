@@ -12,7 +12,7 @@ preference data is required to recover lost alignment?
 
 ## Primary Model
 
-0.5B-scale instruction model.
+Qwen/Qwen2.5-0.5B-Instruct
 
 ## Experts
 
@@ -47,3 +47,11 @@ DPO
 ## Status
 
 Project initialization.
+
+## Setup and Resources
+
+- **GitHub**: Source code and configuration
+- **Kaggle**: GPU training and experiments
+- **Hugging Face**: Model storage, adapters, and checkpoints
+- **Primary Model**: Qwen/Qwen2.5-0.5B-Instruct
+- **Note**: No model weights should be committed to GitHub

@@ -29,3 +29,13 @@ wandb/
 
 # OS
 .DS_Store
+
+# Kaggle
+.kaggle/
+kaggle/
+
+# Python cache extensions
+.pytest_cache/
+.coverage
+*.pyo
+*.pyd
