@@ -284,10 +284,6 @@ def main() -> None:
             dpo_config.get("max_length", 512)
         ),
 
-        max_length=int(
-            dpo_config.get("max_length", 256)
-        ),
-
         # Training batch
         per_device_train_batch_size=int(
             training_config.get(
