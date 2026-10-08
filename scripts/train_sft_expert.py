@@ -411,28 +411,43 @@ def main():
     train_dataset = format_examples(train_examples)
     val_dataset = format_examples(val_examples)
 
-    # Tokenize datasets - UPDATED WITH PROPER LABEL MASKING
     def tokenize_dataset(dataset, tokenizer):
-        max_length = int(training_config.get("max_length", 512))
-
-        tokenized_examples = []
-
-        for example in dataset:
-            result = tokenize_example(
-                example,
-                tokenizer,
-                max_length=max_length,
+        def tokenize_function(examples):
+            tokenized = tokenizer(
+                examples["text"],
+                padding="max_length",
+                truncation=True,
+                max_length=512,
             )
 
-            if result is not None:
-                tokenized_examples.append(result)
+            labels = []
 
-        if not tokenized_examples:
+            for input_ids, attention_mask in zip(
+                tokenized["input_ids"],
+                tokenized["attention_mask"]
+            ):
+                example_labels = [
+                    token if mask == 1 else -100
+                    for token, mask in zip(input_ids, attention_mask)
+                ]
+                labels.append(example_labels)
+
+            tokenized["labels"] = labels
+
+            return tokenized
+
+        tokenized = dataset.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=dataset.column_names,
+        )
+
+        if len(tokenized) == 0:
             raise RuntimeError(
                 "Tokenization produced zero usable examples."
             )
 
-        return Dataset.from_list(tokenized_examples)
+        return tokenized
 
 
     tokenized_train_dataset = tokenize_dataset(
