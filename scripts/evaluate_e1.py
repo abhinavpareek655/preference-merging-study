@@ -58,9 +58,9 @@ from tqdm.auto import tqdm
 BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 EXPERT_REPOS = {
     "E_math": "abhinav655/qwen25-math-expert-full",
-    "E_code": "abhinav655/qwen25-code-expert-full",
-    "E_instr": "abhinav655/qwen25-instruction-expert-full",
-    "E_pref": "abhinav655/qwen25-preference-expert-full",
+    # "E_code": "abhinav655/qwen25-code-expert-full",
+    # "E_instr": "abhinav655/qwen25-instruction-expert-full",
+    # "E_pref": "abhinav655/qwen25-preference-expert-full",
 }
 
 SEED = 42
@@ -687,12 +687,12 @@ def main() -> None:
 
         if expert_name == "E_math":
             results[expert_name].update(evaluate_gsm8k(model, tokenizer))
-        elif expert_name == "E_code":
-            results[expert_name].update(evaluate_mbpp(model, tokenizer))
-        elif expert_name == "E_instr":
-            results[expert_name].update(evaluate_ifeval(model, tokenizer, ifeval_examples))
-        elif expert_name == "E_pref":
-            results[expert_name].update(evaluate_preference(model, tokenizer, preference_examples))
+#         elif expert_name == "E_code":
+#             results[expert_name].update(evaluate_mbpp(model, tokenizer))
+#         elif expert_name == "E_instr":
+#             results[expert_name].update(evaluate_ifeval(model, tokenizer, ifeval_examples))
+#         elif expert_name == "E_pref":
+#             results[expert_name].update(evaluate_preference(model, tokenizer, preference_examples))
 
         cleanup_model(model)
 
@@ -710,56 +710,56 @@ def main() -> None:
         "E_math",
     )
 
-    save_two_bar_plot(
-        PLOTS_DIR / "e1_base_vs_code.png",
-        "E1: Base vs E_code",
-        "MBPP pass@1",
-        results["base"]["mbpp_pass_at_1"],
-        results["E_code"]["mbpp_pass_at_1"],
-        "E_code",
-    )
+    # save_two_bar_plot(
+    #     PLOTS_DIR / "e1_base_vs_code.png",
+    #     "E1: Base vs E_code",
+    #     "MBPP pass@1",
+    #     results["base"]["mbpp_pass_at_1"],
+    #     results["E_code"]["mbpp_pass_at_1"],
+    #     "E_code",
+    # )
 
-    save_two_bar_plot(
-        PLOTS_DIR / "e1_base_vs_instruction.png",
-        "E1: Base vs E_instr",
-        "Instruction-following accuracy",
-        results["base"]["instruction_following_accuracy"],
-        results["E_instr"]["instruction_following_accuracy"],
-        "E_instr",
-    )
+    # save_two_bar_plot(
+    #     PLOTS_DIR / "e1_base_vs_instruction.png",
+    #     "E1: Base vs E_instr",
+    #     "Instruction-following accuracy",
+    #     results["base"]["instruction_following_accuracy"],
+    #     results["E_instr"]["instruction_following_accuracy"],
+    #     "E_instr",
+    # )
 
-    save_two_bar_plot(
-        PLOTS_DIR / "e1_base_vs_preference_accuracy.png",
-        "E1: Base vs E_pref",
-        "Held-out preference accuracy",
-        results["base"]["preference_accuracy"],
-        results["E_pref"]["preference_accuracy"],
-        "E_pref",
-    )
+    # save_two_bar_plot(
+    #     PLOTS_DIR / "e1_base_vs_preference_accuracy.png",
+    #     "E1: Base vs E_pref",
+    #     "Held-out preference accuracy",
+    #     results["base"]["preference_accuracy"],
+    #     results["E_pref"]["preference_accuracy"],
+    #     "E_pref",
+    # )
 
     # Margin is not a bounded percentage, so use a separate plot with the true scale.
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7, 5))
-    labels = ["Base", "E_pref"]
-    values = [
-        results["base"]["mean_pairwise_logprob_margin"],
-        results["E_pref"]["mean_pairwise_logprob_margin"],
-    ]
-    bars = ax.bar(labels, values)
-    ax.axhline(0.0, linewidth=1)
-    ax.set_title("E1: Base vs E_pref — pairwise log-probability margin")
-    ax.set_ylabel("Mean chosen − rejected log probability")
-    for bar, value in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            value,
-            f"{value:.3f}",
-            ha="center",
-            va="bottom" if value >= 0 else "top",
-        )
-    fig.tight_layout()
-    fig.savefig(PLOTS_DIR / "e1_base_vs_preference_margin.png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
+    # import matplotlib.pyplot as plt
+    # fig, ax = plt.subplots(figsize=(7, 5))
+    # labels = ["Base", "E_pref"]
+    # values = [
+    #     results["base"]["mean_pairwise_logprob_margin"],
+    #     results["E_pref"]["mean_pairwise_logprob_margin"],
+    # ]
+    # bars = ax.bar(labels, values)
+    # ax.axhline(0.0, linewidth=1)
+    # ax.set_title("E1: Base vs E_pref — pairwise log-probability margin")
+    # ax.set_ylabel("Mean chosen − rejected log probability")
+    # for bar, value in zip(bars, values):
+    #     ax.text(
+    #         bar.get_x() + bar.get_width() / 2,
+    #         value,
+    #         f"{value:.3f}",
+    #         ha="center",
+    #         va="bottom" if value >= 0 else "top",
+    #     )
+    # fig.tight_layout()
+    # fig.savefig(PLOTS_DIR / "e1_base_vs_preference_margin.png", dpi=180, bbox_inches="tight")
+    # plt.close(fig)
 
     # README.
     README_PATH.write_text(
@@ -777,18 +777,18 @@ def main() -> None:
         f"| Comparison | Base | Expert | Metric |\n"
         f"|---|---:|---:|---|\n"
         f"| Base vs E_math | {results['base']['math_accuracy']:.4f} | {results['E_math']['math_accuracy']:.4f} | GSM8K exact match |\n"
-        f"| Base vs E_code | {results['base']['mbpp_pass_at_1']:.4f} | {results['E_code']['mbpp_pass_at_1']:.4f} | MBPP pass@1 |\n"
-        f"| Base vs E_instr | {results['base']['instruction_following_accuracy']:.4f} | {results['E_instr']['instruction_following_accuracy']:.4f} | IFEval-supported subset accuracy |\n"
-        f"| Base vs E_pref | {results['base']['preference_accuracy']:.4f} | {results['E_pref']['preference_accuracy']:.4f} | Held-out preference accuracy |\n"
-        f"| Base vs E_pref | {results['base']['mean_pairwise_logprob_margin']:.4f} | {results['E_pref']['mean_pairwise_logprob_margin']:.4f} | Mean pairwise log-probability margin |\n\n"
+        # f"| Base vs E_code | {results['base']['mbpp_pass_at_1']:.4f} | {results['E_code']['mbpp_pass_at_1']:.4f} | MBPP pass@1 |\n"
+        # f"| Base vs E_instr | {results['base']['instruction_following_accuracy']:.4f} | {results['E_instr']['instruction_following_accuracy']:.4f} | IFEval-supported subset accuracy |\n"
+        # f"| Base vs E_pref | {results['base']['preference_accuracy']:.4f} | {results['E_pref']['preference_accuracy']:.4f} | Held-out preference accuracy |\n"
+        # f"| Base vs E_pref | {results['base']['mean_pairwise_logprob_margin']:.4f} | {results['E_pref']['mean_pairwise_logprob_margin']:.4f} | Mean pairwise log-probability margin |\n\n"
         f"Seed: {SEED}\n\n"
         f"## Generated files\n"
         f"- evaluations/e1_results.json\n"
         f"- plots/e1_base_vs_math.png\n"
-        f"- plots/e1_base_vs_code.png\n"
-        f"- plots/e1_base_vs_instruction.png\n"
-        f"- plots/e1_base_vs_preference_accuracy.png\n"
-        f"- plots/e1_base_vs_preference_margin.png\n\n"
+        # f"- plots/e1_base_vs_code.png\n"
+        # f"- plots/e1_base_vs_instruction.png\n"
+        # f"- plots/e1_base_vs_preference_accuracy.png\n"
+        # f"- plots/e1_base_vs_preference_margin.png\n\n"
         f"## Notes\n"
         f"- All model weights are loaded from Hugging Face.\n"
         f"- All evaluation is intended to run on Kaggle only.\n"
@@ -802,10 +802,10 @@ def main() -> None:
     print("E1 SANITY EVALUATION COMPLETE")
     print("=" * 72)
     print(f"Base vs E_math       : {results['base']['math_accuracy']:.4f} -> {results['E_math']['math_accuracy']:.4f}")
-    print(f"Base vs E_code       : {results['base']['mbpp_pass_at_1']:.4f} -> {results['E_code']['mbpp_pass_at_1']:.4f}")
-    print(f"Base vs E_instr      : {results['base']['instruction_following_accuracy']:.4f} -> {results['E_instr']['instruction_following_accuracy']:.4f}")
-    print(f"Base vs E_pref       : {results['base']['preference_accuracy']:.4f} -> {results['E_pref']['preference_accuracy']:.4f}")
-    print(f"Preference margin    : {results['base']['mean_pairwise_logprob_margin']:.4f} -> {results['E_pref']['mean_pairwise_logprob_margin']:.4f}")
+    # print(f"Base vs E_code       : {results['base']['mbpp_pass_at_1']:.4f} -> {results['E_code']['mbpp_pass_at_1']:.4f}")
+    # print(f"Base vs E_instr      : {results['base']['instruction_following_accuracy']:.4f} -> {results['E_instr']['instruction_following_accuracy']:.4f}")
+    # print(f"Base vs E_pref       : {results['base']['preference_accuracy']:.4f} -> {results['E_pref']['preference_accuracy']:.4f}")
+    # print(f"Preference margin    : {results['base']['mean_pairwise_logprob_margin']:.4f} -> {results['E_pref']['mean_pairwise_logprob_margin']:.4f}")
     print(f"\nResults: {RESULTS_PATH}")
     print(f"Plots  : {PLOTS_DIR}/")
     print(f"README : {README_PATH}")
