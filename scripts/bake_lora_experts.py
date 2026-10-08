@@ -228,7 +228,7 @@ def main():
         print(f"{emoji} {entry['expert']}: {status}")
 
     # Count successes
-    successes = sum(1 for e in manifest if e['banking_status'] == 'success')
+    successes = sum(1 for e in manifest if e['baking_status'] == 'success')
     print(f"\n🎯 Successfully baked: {sum(1 for e in manifest if e['baking_status'] == 'success')}/{len([e for e in manifest if e['expert'] != 'E_pref' or e_pref_verified])} experts")
 
 def validate_baked_model(model_path, tokenizer, expert_name):
