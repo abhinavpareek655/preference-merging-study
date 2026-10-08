@@ -120,32 +120,82 @@ def get_dataset_loader(expert_type: str):
         raise ValueError(f"Unknown expert type: {expert_type}")
 
 
-def tokenize_function(examples, tokenizer):
-    """Tokenize function that properly handles labels for causal LM.
-
-    Masks padding tokens with -100 so they don't contribute to loss.
+def tokenize_example(example, tokenizer, max_length=512):
     """
-    tokenized = tokenizer(
-        examples["text"],
-        padding="max_length",
-        truncation=True,
-        max_length=512,  # Increased from 128 to 512
+    Tokenize one instruction/response pair.
+
+    Loss is computed only on assistant-response tokens.
+    User/prompt tokens and padding tokens are masked with -100.
+    """
+
+    user_content = example["instruction"]
+    if example.get("input"):
+        user_content += " " + example["input"]
+
+    prompt_messages = [
+        {
+            "role": "user",
+            "content": user_content,
+        }
+    ]
+
+    full_messages = [
+        {
+            "role": "user",
+            "content": user_content,
+        },
+        {
+            "role": "assistant",
+            "content": example["output"],
+        },
+    ]
+
+    # Prompt including the generation marker.
+    prompt_ids = tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True,
     )
 
-    labels = []
-    for input_ids, attention_mask in zip(
-        tokenized["input_ids"],
-        tokenized["attention_mask"]
-    ):
-        # Only compute loss on non-padded tokens
-        example_labels = [
-            token if mask == 1 else -100
-            for token, mask in zip(input_ids, attention_mask)
-        ]
-        labels.append(example_labels)
+    # Full prompt + assistant response.
+    full_ids = tokenizer.apply_chat_template(
+        full_messages,
+        tokenize=True,
+        add_generation_prompt=False,
+    )
 
-    tokenized["labels"] = labels
-    return tokenized
+    # Prevent examples where the prompt itself consumes the whole limit.
+    if len(prompt_ids) >= max_length:
+        return None
+
+    # Truncate the complete sequence.
+    full_ids = full_ids[:max_length]
+
+    # If truncation removed all assistant tokens, reject the example.
+    if len(full_ids) <= len(prompt_ids):
+        return None
+
+    attention_mask = [1] * len(full_ids)
+
+    # Ignore prompt tokens.
+    labels = [-100] * len(prompt_ids)
+
+    # Train only on assistant tokens.
+    labels.extend(full_ids[len(prompt_ids):])
+
+    # Pad to fixed length.
+    padding_length = max_length - len(full_ids)
+
+    if padding_length > 0:
+        full_ids.extend([tokenizer.pad_token_id] * padding_length)
+        attention_mask.extend([0] * padding_length)
+        labels.extend([-100] * padding_length)
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+    }
 
 
 def main():
@@ -288,15 +338,20 @@ def main():
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+    if training_config.get("gradient_checkpointing", True):
+        model.config.use_cache = False
 
-    # LoRA configuration - UPDATED PER USER FEEDBACK
+    # LoRA configuration
     lora_params = LoraConfig(
-        r=lora_config.get('r', 16),  # Increased from 8 to 16
-        lora_alpha=lora_config.get('lora_alpha', 32),
-        target_modules=lora_config.get('target_modules', ["q_proj", "k_proj", "v_proj", "o_proj"]),  # Expanded from q_proj, v_proj to q,k,v,o
-        lora_dropout=lora_config.get('lora_dropout', 0.05),
-        bias=lora_config.get('bias', "none"),
-        task_type=lora_config.get('task_type', "CAUSAL_LM"),
+        r=lora_config.get("r", 8),
+        lora_alpha=lora_config.get("lora_alpha", 32),
+        target_modules=lora_config.get(
+            "target_modules",
+            ["q_proj", "v_proj"],
+        ),
+        lora_dropout=lora_config.get("lora_dropout", 0.05),
+        bias=lora_config.get("bias", "none"),
+        task_type=lora_config.get("task_type", "CAUSAL_LM"),
     )
 
     # Prepare model for LoRA
@@ -341,24 +396,16 @@ def main():
     )
 
     # Format examples
-    def format_example(example, tokenizer):
-        # Format as a conversation
-        # For instruction tuning, we want to primarily train on the assistant response
-        # We'll use the full conversation but rely on proper labeling to focus loss on assistant
-        messages = [
-            {"role": "user", "content": example["instruction"] + (" " + example["input"] if example["input"] else "")},
-            {"role": "assistant", "content": example["output"]},
-        ]
-        # Apply chat template
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,  # We are training on the full sequence
-        )
-        return {"text": text}
+    def format_example(example):
+        return {
+            "instruction": example["instruction"],
+            "input": example["input"],
+            "output": example["output"],
+        }
+
 
     def format_examples(examples):
-        formatted = [format_example(ex, tokenizer) for ex in examples]
+        formatted = [format_example(ex) for ex in examples]
         return Dataset.from_list(formatted)
 
     train_dataset = format_examples(train_examples)
@@ -366,14 +413,37 @@ def main():
 
     # Tokenize datasets - UPDATED WITH PROPER LABEL MASKING
     def tokenize_dataset(dataset, tokenizer):
-        return dataset.map(
-            lambda x: tokenize_function(x, tokenizer),
-            batched=True,
-            remove_columns=["text"]
-        )
+        max_length = int(training_config.get("max_length", 512))
 
-    tokenized_train_dataset = tokenize_dataset(train_dataset, tokenizer)
-    tokenized_val_dataset = tokenize_dataset(val_dataset, tokenizer)
+        tokenized_examples = []
+
+        for example in dataset:
+            result = tokenize_example(
+                example,
+                tokenizer,
+                max_length=max_length,
+            )
+
+            if result is not None:
+                tokenized_examples.append(result)
+
+        if not tokenized_examples:
+            raise RuntimeError(
+                "Tokenization produced zero usable examples."
+            )
+
+        return Dataset.from_list(tokenized_examples)
+
+
+    tokenized_train_dataset = tokenize_dataset(
+        train_dataset,
+        tokenizer,
+    )
+
+    tokenized_val_dataset = tokenize_dataset(
+        val_dataset,
+        tokenizer,
+    )
 
     # Set up training arguments - UPDATED PER USER FEEDBACK
     output_dir = training_config.get('output_dir', "./outputs")
@@ -381,32 +451,71 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # Calculate effective batch size with gradient accumulation
-    per_device_batch = training_config.get('per_device_train_batch_size', 2)
-    grad_accum = training_config.get('gradient_accumulation_steps', 4)
+    per_device_batch = training_config.get('per_device_train_batch_size', 4)
+    grad_accum = training_config.get('gradient_accumulation_steps', 2)
     effective_batch = per_device_batch * grad_accum
 
     print(f"Effective batch size: {per_device_batch} × {grad_accum} = {effective_batch}")
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=per_device_batch,  # Reduced from 4 to 2
-        gradient_accumulation_steps=grad_accum,  # Added gradient accumulation
-        warmup_steps=training_config.get('warmup_steps', 20),  # Increased from 10 to 20
-        max_steps=training_config.get('max_steps', 300),  # Increased from 100 to 300
-        learning_rate=float(training_config.get('learning_rate', 2.0e-5)),  # Reduced from 1e-4 to 2e-5
-        fp16=training_config.get('fp16', True),
-        logging_steps=training_config.get('logging_steps', 10),  # Increased from 5 to 10
-        # IMPORTANT
+
+        per_device_train_batch_size=per_device_batch,
+        gradient_accumulation_steps=grad_accum,
+
+        warmup_steps=training_config.get(
+            "warmup_steps",
+            10,
+        ),
+
+        max_steps=training_config.get(
+            "max_steps",
+            100,
+        ),
+
+        learning_rate=float(
+            training_config.get(
+                "learning_rate",
+                1.0e-4,
+            )
+        ),
+
+        fp16=training_config.get(
+            "fp16",
+            True,
+        ),
+
+        logging_steps=training_config.get(
+            "logging_steps",
+            5,
+        ),
+
         eval_strategy="steps",
-        eval_steps=training_config.get('eval_steps', 25),  # Increased from 20 to 25
+        eval_steps=training_config.get(
+            "eval_steps",
+            20,
+        ),
+
         save_strategy="steps",
-        save_steps=training_config.get('save_steps', 25),  # Increased from 20 to 25
-        report_to=training_config.get('report_to', "none"),
+        save_steps=training_config.get(
+            "save_steps",
+            20,
+        ),
+
+        report_to=training_config.get(
+            "report_to",
+            "none",
+        ),
+
         seed=seed,
+
         load_best_model_at_end=True,
-        # Added gradient checkpointing for memory efficiency with longer sequences
-        gradient_checkpointing=training_config.get('gradient_checkpointing', True),
-        # Added metrics for best model selection
+
+        gradient_checkpointing=training_config.get(
+            "gradient_checkpointing",
+            True,
+        ),
+
         metric_for_best_model="eval_loss",
         greater_is_better=False,
     )
@@ -450,12 +559,17 @@ def main():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=128,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
+                do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        prompt_length = inputs["input_ids"].shape[-1]
+
+        generated_ids = outputs[0, prompt_length:]
+
+        response = tokenizer.decode(
+            generated_ids,
+            skip_special_tokens=True,
+        ).strip()
         print(f"Prompt: {full_prompt}")
         print(f"Response: {response}")
 
