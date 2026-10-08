@@ -37,10 +37,10 @@ Primary method: DPO (with GRPO as secondary replication)
 - **E_code**: ✅ TRAINED, ✅ UPLOADED TO HUGGING FACE
 - **E_instr**: ✅ TRAINED, ✅ UPLOADED TO HUGGING FACE
 - **E_pref**: ✅ DPO PIPELINE CREATED, ✅ SMOKE TEST COMPLETED, ✅ ADAPTER UPLOADED, ⚠️ FINAL 2k/100-step RESEARCH RUN MUST BE VERIFIED
-- **LoRA baking**: ⏳ NEXT
+- **LoRA baking**: DONE
+- **E1 sanity evaluation**: ⏳ NEXT
 - **Expert delta extraction**: ⏳ NEXT
 - **Merge implementation**: ⏳ NEXT
-- **E1 sanity evaluation**: ⏳ NEXT
 - **E2 retention curves**: ⏳ FUTURE
 - **E3–E8**: ⏳ FUTURE
 - **E9 GRPO**: ⏳ SECONDARY FUTURE

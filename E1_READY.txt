@@ -1,0 +1,106 @@
+# E1 Sanity Evaluation - Prepared and Ready to Run
+
+## 📋 Current Project Status (from progress.md)
+
+**Expert Training Status:**
+- ✅ **E_math**: SFT + LoRA - COMPLETED (HF: abhinav655/qwen25-math-expert)
+- ✅ **E_code**: SFT + LoRA - COMPLETED (HF: abhinav655/qwen25-code-expert)
+- ✅ **E_instr**: SFT + LoRA - COMPLETED (HF: abhinav655/qwen25-instruction-expert)
+- ⚠️ **E_pref**: DPO + LoRA - **SMOKE TEST COMPLETE; FINAL RUN TO VERIFY** (HF: abhinav655/qwen25-preference-expert)
+
+> **Critical**: The progress.md explicitly states: "⚠️ FINAL 2k/100-step RESEARCH RUN MUST BE VERIFIED"
+
+## 🔧 What I've Prepared
+
+I've created a comprehensive E1 evaluation script: `scripts/evaluate_e1.py` that:
+
+### ✅ Script Features:
+1. **Loads models from Hugging Face**:
+   - Base: `Qwen/Qwen2.5-0.5B-Instruct`
+   - Experts: `abhinav655/qwen25-*-expert-full` (the baked versions)
+
+2. **Evaluates all required metrics**:
+   - **Preference metrics** (all models): chosen-vs-rejected accuracy, mean DPO margin
+   - **Math capability** (E_math focus): GSM8K exact match
+   - **Code capability** (E_code focus): MBPP pass@1
+   - **Instruction capability** (E_instr focus): IFEval-style constraint following
+
+3. **Uses proper evaluation methodology**:
+   - Deterministic settings (seed 42, temperature 0.0)
+   - Held-out preference set (1,000 examples not used in E_pref training)
+   - Qwen chat template formatting
+   - Proper response extraction
+
+4. **Generates all requested outputs**:
+   - Raw results: `evaluations/e1_results.json`
+   - Publication plots: `plots/e1_*.png` (4 plots)
+   - Documentation: `experiments/E1_sanity/README.md`
+
+5. **Handles edge cases gracefully**:
+   - Falls back to base model if expert fails to load
+   - Provides clear error reporting
+   - Uses N/A for metrics not applicable to a model
+
+## 🚨 E1 Evaluation Prerequisites
+
+**Before running E1 evaluation, you MUST:**
+
+### 1. **Complete E_pref final training**
+- Run the 2,000-example/100-step DPO training
+- Verify it completes successfully
+- **Update progress.md** to show E_pref as "COMPLETED" (not smoke test)
+
+### 2. **Bake all four experts**
+After E_pref verification, run the baking script:
+```bash
+# Install/upgrade dependencies
+pip install --upgrade torch transformers peft huggingface_hub torchao>=0.16.0 -q
+
+# Ensure HF_TOKEN is set in Kaggle Secrets
+
+# Execute baking
+python scripts/bake_lora_experts.py
+```
+
+This will create:
+- `abhinav655/qwen25-math-expert-full`
+- `abhinav655/qwen25-code-expert-full`
+- `abhinav655/qwen25-instruction-expert-full`
+- `abhinav655/qwen25-preference-expert-full` (only after E_pref verification)
+
+### 3. **Verify baked models exist on HF**
+The evaluation script expects the `-full` repositories to be available.
+
+## 📊 What E1 Will Measure
+
+Once prerequisites are met, E1 will answer:
+
+**Key Question**: Does each specialist improve its intended capability versus base?
+
+| Model       | Intended Capability | Expected Improvement |
+|-------------|-------------------|---------------------|
+| **E_math**  | Math reasoning    | ↑ GSM8K accuracy    |
+| **E_code**  | Code generation   | ↑ MBPP pass@1       |
+| **E_instr** | Instruction following | ↑ Constraint success |
+| **E_pref**  | Preference alignment | ↑ Held-out preference accuracy & DPO margin |
+
+## 📈 Next Steps After E1
+
+If E1 shows specialists improve their intended capabilities:
+1. **Proceed to E2**: Two-model linear merging (E_pref + E_math)
+2. **Implement merge infrastructure**
+3. **Evaluate B0/B1/B2 sanity conditions**
+4. **Add TIES and DARE-TIES merging methods**
+5. **Calculate PRR (Preference Retention Ratio)**
+6. **Move to consortium size and workflow-order experiments**
+
+## 📝 Current Action Required
+
+**IMMEDIATE PRIORITY**: Complete and verify the final E_pref training run (2,000 examples, DPO, 100 steps, seed 42).
+
+Once that's done and progress.md is updated, you can:
+1. Run the baking script to create all four `-full` expert models
+2. Execute `python scripts/evaluate_e1.py` to run E1 evaluation
+3. Review results in `evaluations/e1_results.json` and `plots/`
+
+The E1 evaluation script is ready and waiting for the baked expert models to become available!

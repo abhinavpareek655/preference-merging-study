@@ -23,40 +23,50 @@ From the progress.md file (last updated 2026-10-06):
 - The **final 2k/100-step research run MUST BE VERIFIED** before proceeding
 - The smoke test adapter should NOT be treated as the final E_pref model for baking
 
-## 3. Which experts were successfully baked
+## 3. Baking Script Status
 
-**No experts have been baked yet.** The baking script (`scripts/bake_lora_experts.py`) has been updated and prepared for execution, but the actual baking process has not been run.
+I've updated `scripts/bake_lora_experts.py` to be robust for Kaggle-only workflow with all requested features:
+- Loads FRESH base model for each expert
+- Uses `dtype=` instead of deprecated `torch_dtype=`
+- Gets HF token from Kaggle secrets using `kaggle_secrets.UserSecretsClient()`
+- Uses explicit `HfApi(token=token)`
+- Merges with `merge_and_unload(safe_merge=True)`
+- Saves temporarily, validates, then uploads to HF
+- Validation reloads both model and tokenizer, uses Qwen chat template
+- Records seed=42 for all experts
+- Uses clean temporary directory for each expert
+- **Checks progress.md for E_pref status before processing** - will skip E_pref if not verified
+- Does NOT compute merges or implement TIES/DARE-TIES
+
+## 4. Which experts were successfully baked
+
+**No experts have been baked yet.** The baking script has been updated and prepared for execution, but the actual baking process has not been run because E_pref verification is still pending (as per progress.md).
 
 The script is designed to:
-- Load base model: Qwen/Qwen2.5-0.5B-Instruct
-- Load each LoRA adapter from Hugging Face
-- Merge adapters into full model weights using PEFT
-- Validate each baked model (reload, generation test, save/reload test)
-- Upload baked models to new Hugging Face repositories:
-  - abhinav655/qwen25-math-expert-full
-  - abhinav655/qwen25-code-expert-full
-  - abhinav655/qwen25-instruction-expert-full
-  - abhinav655/qwen25-preference-expert-full
+- Skip E_pref processing if progress.md shows only smoke test complete
+- Process E_math, E_code, E_instr if their HF adapters are available
+- Upload baked models to new HF repositories (with `-full` suffix)
 - Create a manifest.json with metadata
 
-## 4. Exact output directories (planned)
+## 5. Exact output directories (planned)
 
 The script will upload baked models to Hugging Face repositories (not local directories):
 - E_math full model: abhinav655/qwen25-math-expert-full
 - E_code full model: abhinav655/qwen25-code-expert-full
 - E_instr full model: abhinav655/qwen25-instruction-expert-full
-- E_pref full model: abhinav655/qwen25-preference-expert-full
+- E_pref full model: abhinav655/qwen25-preference-expert-full (only if verified)
 
 A local manifest.json will be created with metadata for each expert.
 
-## 5. Validation results
+## 6. Validation results
 
-**Validation has not been performed yet** as the baking process has not been executed. The validation procedure in the script includes:
+**Validation has not been performed yet** as the baking process has not been executed (pending E_pref verification). The validation procedure in the script includes:
 1. Reloading the baked model with AutoModelForCausalLM
-2. Running a simple generation test
+2. Running a simple generation test using Qwen chat template
 3. Confirming the model can be saved and reloaded successfully
+4. Verifying no LoRA adapter files/dependencies remain
 
-## 6. What the next research step should be after baking
+## 7. What the next research step should be after baking
 
 **Immediate next step:** Run the final E_pref training (2,000 preference pairs, DPO, 100 training steps, seed 42) to obtain the actual research checkpoint.
 

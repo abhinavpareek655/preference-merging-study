@@ -1,0 +1,38 @@
+[
+  {
+    "expert": "E_math",
+    "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "adapter_source": "abhinav655/qwen25-math-expert",
+    "baked_output_repo": "abhinav655/qwen25-math-expert-full",
+    "seed": 42,
+    "baking_status": "success",
+    "validation_passed": true
+  },
+  {
+    "expert": "E_code",
+    "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "adapter_source": "abhinav655/qwen25-code-expert",
+    "baked_output_repo": "abhinav655/qwen25-code-expert-full",
+    "seed": 42,
+    "baking_status": "success",
+    "validation_passed": true
+  },
+  {
+    "expert": "E_instr",
+    "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "adapter_source": "abhinav655/qwen25-instruction-expert",
+    "baked_output_repo": "abhinav655/qwen25-instruction-expert-full",
+    "seed": 42,
+    "baking_status": "success",
+    "validation_passed": true
+  },
+  {
+    "expert": "E_pref",
+    "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "adapter_source": "abhinav655/qwen25-preference-expert",
+    "baked_output_repo": "abhinav655/qwen25-preference-expert-full",
+    "seed": 42,
+    "baking_status": "success",
+    "validation_passed": true
+  }
+]
