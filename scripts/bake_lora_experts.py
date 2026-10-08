@@ -35,6 +35,7 @@ from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from huggingface_hub import HfApi
+from kaggle_secrets import UserSecretsClient
 
 # Configuration
 BASE_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -84,7 +85,8 @@ def check_e_pref_status():
 
 def main():
     # Get HF token from Kaggle secrets/environment
-    token = os.getenv("HF_TOKEN")
+    user_secrets = UserSecretsClient()
+    token = user_secrets.get_secret("HF_TOKEN")
     if not token:
         raise ValueError("HF_TOKEN environment variable not found. Please set it in Kaggle secrets.")
 
