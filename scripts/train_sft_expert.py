@@ -412,6 +412,7 @@ def main():
     val_dataset = format_examples(val_examples)
 
     def tokenize_dataset(dataset, tokenizer):
+
         def tokenize_function(examples):
             tokenized = tokenizer(
                 examples["text"],
@@ -436,11 +437,51 @@ def main():
 
             return tokenized
 
+        # IMPORTANT: create the text column first
+        dataset = dataset.map(
+            lambda examples: {
+                "text": [
+                    tokenizer.apply_chat_template(
+                        [
+                            {
+                                "role": "user",
+                                "content": (
+                                    instruction
+                                    + (
+                                        "\n\n" + inp
+                                        if inp and inp.strip()
+                                        else ""
+                                    )
+                                ),
+                            },
+                            {
+                                "role": "assistant",
+                                "content": output,
+                            },
+                        ],
+                        tokenize=False,
+                        add_generation_prompt=False,
+                    )
+                    for instruction, inp, output in zip(
+                        examples["instruction"],
+                        examples["input"],
+                        examples["output"],
+                    )
+                ]
+            },
+            batched=True,
+        )
+
+        print("Columns before tokenization:", dataset.column_names)
+        print("Examples before tokenization:", len(dataset))
+
         tokenized = dataset.map(
             tokenize_function,
             batched=True,
             remove_columns=dataset.column_names,
         )
+
+        print("Examples after tokenization:", len(tokenized))
 
         if len(tokenized) == 0:
             raise RuntimeError(
@@ -449,7 +490,9 @@ def main():
 
         return tokenized
 
-
+    print("TRAIN DATASET COLUMNS:", train_dataset.column_names)
+    print("FIRST TRAIN EXAMPLE:", train_dataset[0])
+    
     tokenized_train_dataset = tokenize_dataset(
         train_dataset,
         tokenizer,
