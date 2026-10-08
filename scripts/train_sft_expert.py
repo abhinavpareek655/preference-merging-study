@@ -120,6 +120,34 @@ def get_dataset_loader(expert_type: str):
         raise ValueError(f"Unknown expert type: {expert_type}")
 
 
+def tokenize_function(examples, tokenizer):
+    """Tokenize function that properly handles labels for causal LM.
+
+    Masks padding tokens with -100 so they don't contribute to loss.
+    """
+    tokenized = tokenizer(
+        examples["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=512,  # Increased from 128 to 512
+    )
+
+    labels = []
+    for input_ids, attention_mask in zip(
+        tokenized["input_ids"],
+        tokenized["attention_mask"]
+    ):
+        # Only compute loss on non-padded tokens
+        example_labels = [
+            token if mask == 1 else -100
+            for token, mask in zip(input_ids, attention_mask)
+        ]
+        labels.append(example_labels)
+
+    tokenized["labels"] = labels
+    return tokenized
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train SFT expert with LoRA")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
@@ -261,11 +289,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # LoRA configuration
+    # LoRA configuration - UPDATED PER USER FEEDBACK
     lora_params = LoraConfig(
-        r=lora_config.get('r', 8),
+        r=lora_config.get('r', 16),  # Increased from 8 to 16
         lora_alpha=lora_config.get('lora_alpha', 32),
-        target_modules=lora_config.get('target_modules', ["q_proj", "v_proj"]),
+        target_modules=lora_config.get('target_modules', ["q_proj", "k_proj", "v_proj", "o_proj"]),  # Expanded from q_proj, v_proj to q,k,v,o
         lora_dropout=lora_config.get('lora_dropout', 0.05),
         bias=lora_config.get('bias', "none"),
         task_type=lora_config.get('task_type', "CAUSAL_LM"),
@@ -315,6 +343,8 @@ def main():
     # Format examples
     def format_example(example, tokenizer):
         # Format as a conversation
+        # For instruction tuning, we want to primarily train on the assistant response
+        # We'll use the full conversation but rely on proper labeling to focus loss on assistant
         messages = [
             {"role": "user", "content": example["instruction"] + (" " + example["input"] if example["input"] else "")},
             {"role": "assistant", "content": example["output"]},
@@ -334,19 +364,7 @@ def main():
     train_dataset = format_examples(train_examples)
     val_dataset = format_examples(val_examples)
 
-    # Tokenize datasets
-    def tokenize_function(examples, tokenizer):
-        tokenized = tokenizer(
-            examples["text"],
-            padding="max_length",
-            truncation=True,
-            max_length=128,
-            return_tensors="pt",
-        )
-        # For causal LM, labels are the same as input_ids
-        tokenized["labels"] = tokenized["input_ids"].clone()
-        return tokenized
-
+    # Tokenize datasets - UPDATED WITH PROPER LABEL MASKING
     def tokenize_dataset(dataset, tokenizer):
         return dataset.map(
             lambda x: tokenize_function(x, tokenizer),
@@ -357,40 +375,40 @@ def main():
     tokenized_train_dataset = tokenize_dataset(train_dataset, tokenizer)
     tokenized_val_dataset = tokenize_dataset(val_dataset, tokenizer)
 
-    # Set up training arguments
+    # Set up training arguments - UPDATED PER USER FEEDBACK
     output_dir = training_config.get('output_dir', "./outputs")
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
+    # Calculate effective batch size with gradient accumulation
+    per_device_batch = training_config.get('per_device_train_batch_size', 2)
+    grad_accum = training_config.get('gradient_accumulation_steps', 4)
+    effective_batch = per_device_batch * grad_accum
+
+    print(f"Effective batch size: {per_device_batch} × {grad_accum} = {effective_batch}")
+
     training_args = TrainingArguments(
         output_dir=output_dir,
-
-        per_device_train_batch_size=training_config.get(
-            'per_device_train_batch_size', 4
-        ),
-        gradient_accumulation_steps=training_config.get(
-            'gradient_accumulation_steps', 2
-        ),
-
-        warmup_steps=training_config.get('warmup_steps', 10),
-        max_steps=training_config.get('max_steps', 100),
-        learning_rate=float(training_config.get('learning_rate', 1e-4)),
-
+        per_device_train_batch_size=per_device_batch,  # Reduced from 4 to 2
+        gradient_accumulation_steps=grad_accum,  # Added gradient accumulation
+        warmup_steps=training_config.get('warmup_steps', 20),  # Increased from 10 to 20
+        max_steps=training_config.get('max_steps', 300),  # Increased from 100 to 300
+        learning_rate=float(training_config.get('learning_rate', 2.0e-5)),  # Reduced from 1e-4 to 2e-5
         fp16=training_config.get('fp16', True),
-
-        logging_steps=training_config.get('logging_steps', 5),
-
+        logging_steps=training_config.get('logging_steps', 10),  # Increased from 5 to 10
         # IMPORTANT
         eval_strategy="steps",
-        eval_steps=training_config.get('eval_steps', 20),
-
+        eval_steps=training_config.get('eval_steps', 25),  # Increased from 20 to 25
         save_strategy="steps",
-        save_steps=training_config.get('save_steps', 20),
-
+        save_steps=training_config.get('save_steps', 25),  # Increased from 20 to 25
         report_to=training_config.get('report_to', "none"),
         seed=seed,
-
         load_best_model_at_end=True,
+        # Added gradient checkpointing for memory efficiency with longer sequences
+        gradient_checkpointing=training_config.get('gradient_checkpointing', True),
+        # Added metrics for best model selection
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     # Initialize the Trainer

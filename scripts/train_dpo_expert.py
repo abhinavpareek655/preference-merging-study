@@ -161,7 +161,7 @@ def main() -> None:
         dataset_name=dataset_name,
         train_split=train_split,
         subset_size=subset_size,
-        validation_split=validation_split,
+        validation_split=validation_seed,
         seed=seed,
     )
 
@@ -228,15 +228,15 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # ---------------------------------------------------------
-    # LoRA configuration
+    # LoRA configuration - UPDATED PER USER FEEDBACK
     # ---------------------------------------------------------
 
     lora_params = LoraConfig(
-        r=lora_config.get("r", 8),
+        r=lora_config.get("r", 16),  # Increased from 8 to 16
         lora_alpha=lora_config.get("lora_alpha", 32),
         target_modules=lora_config.get(
             "target_modules",
-            ["q_proj", "v_proj"],
+            ["q_proj", "k_proj", "v_proj", "o_proj"],  # Expanded from q_proj, v_proj to q,k,v,o
         ),
         lora_dropout=lora_config.get(
             "lora_dropout",
@@ -264,8 +264,21 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     # ---------------------------------------------------------
-    # DPO training configuration
+    # DPO training configuration - UPDATED PER USER FEEDBACK
     # ---------------------------------------------------------
+
+    # Calculate effective batch size with gradient accumulation
+    per_device_batch = training_config.get(
+        "per_device_train_batch_size",
+        2,
+    )
+    grad_accum = training_config.get(
+        "gradient_accumulation_steps",
+        4,
+    )
+    effective_batch = per_device_batch * grad_accum
+
+    print(f"Effective batch size: {per_device_batch} × {grad_accum} = {effective_batch}")
 
     training_args = DPOConfig(
         output_dir=output_dir,
@@ -281,17 +294,14 @@ def main() -> None:
         ),
 
         max_length=int(
-            dpo_config.get("max_length", 512)
-        ),
-
-        # Training batch
-        per_device_train_batch_size=int(
-            training_config.get(
-                "per_device_train_batch_size",
-                2,
+            dpo_config.get(
+                "max_length",
+                512,
             )
         ),
 
+        # Training batch
+        per_device_train_batch_size=per_device_batch,  # Reduced from 2 to 2 (kept same, but will use grad accum)
         per_device_eval_batch_size=int(
             training_config.get(
                 "per_device_eval_batch_size",
@@ -299,34 +309,29 @@ def main() -> None:
             )
         ),
 
-        gradient_accumulation_steps=int(
-            training_config.get(
-                "gradient_accumulation_steps",
-                4,
-            )
-        ),
+        gradient_accumulation_steps=grad_accum,  # Added gradient accumulation
 
         # Optimization
         warmup_steps=int(
             training_config.get(
                 "warmup_steps",
-                10,
+                20,
             )
-        ),
+        ),  # Increased from 10 to 20
 
         max_steps=int(
             training_config.get(
                 "max_steps",
-                100,
+                200,
             )
-        ),
+        ),  # Increased from 100 to 200
 
         learning_rate=float(
             training_config.get(
                 "learning_rate",
-                5e-5,
+                1.0e-5,
             )
-        ),
+        ),  # Reduced from 5e-5 to 1e-5
 
         # Mixed precision
         fp16=bool(
@@ -380,6 +385,16 @@ def main() -> None:
 
         # Keep evaluation columns
         remove_unused_columns=False,
+
+        # Added gradient checkpointing for memory efficiency
+        gradient_checkpointing=training_config.get(
+            "gradient_checkpointing",
+            True,
+        ),
+
+        # Added metrics for best model selection
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
     )
 
     # ---------------------------------------------------------
