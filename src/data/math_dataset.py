@@ -1,11 +1,73 @@
 """
-Math dataset loader for OpenR1-Math-220k
-Loads and formats the dataset for SFT training.
+Math dataset loader for SFT training.
+
+Fixes the original bug: OpenR1-Math-220k examples were trained on the bare
+`answer` field (e.g. "364") instead of the worked `solution`.
+
+Supported datasets (chosen automatically from the dataset name):
+  - open-r1/OpenR1-Math-220k   -> problem / solution   (olympiad level, hard for 0.5B)
+  - meta-math/MetaMathQA       -> query / response     (step-by-step, recommended)
+  - openai/gsm8k               -> question / answer    (calculator tags stripped)
+
+Function names and signatures are unchanged, so train_sft_expert.py needs no edits.
 """
 
-from datasets import load_dataset
-from typing import Dict, List, Optional
 import random
+import re
+from typing import Dict, List, Optional
+
+from datasets import load_dataset
+
+_GSM8K_CALC_TAG = re.compile(r"<<.*?>>")
+
+
+def _load_raw(dataset_name: str, split: str):
+    if "gsm8k" in dataset_name.lower():
+        return load_dataset(dataset_name, "main", split=split)
+    return load_dataset(dataset_name, split=split)
+
+
+def _format_example(example: dict, dataset_name: str) -> Optional[Dict[str, str]]:
+    """Map one raw example to {instruction, input, output}, or None if unusable."""
+    name = dataset_name.lower()
+
+    if "gsm8k" in name:
+        question = example.get("question")
+        answer = example.get("answer") or ""
+        answer = _GSM8K_CALC_TAG.sub("", answer)
+        if "####" in answer:
+            reasoning, final = answer.split("####", 1)
+            answer = f"{reasoning.strip()}\nThe answer is: {final.strip()}"
+    elif "metamath" in name:
+        question = example.get("query")
+        answer = example.get("response")
+    else:  # OpenR1-Math-220k (and similar): use the worked solution, NOT `answer`
+        question = example.get("problem")
+        answer = example.get("solution")
+
+    question = (question or "").strip()
+    answer = (answer or "").strip()
+    if not question or not answer:
+        return None
+    return {"instruction": question, "input": "", "output": answer}
+
+
+def _load_formatted(dataset_name: str, split: str, subset_size: int,
+                    seed: int) -> List[Dict[str, str]]:
+    """Shuffle deterministically and collect up to subset_size VALID examples."""
+    dataset = _load_raw(dataset_name, split)
+
+    indices = list(range(len(dataset)))
+    random.Random(seed).shuffle(indices)
+
+    examples: List[Dict[str, str]] = []
+    for i in indices:
+        formatted = _format_example(dataset[i], dataset_name)
+        if formatted is not None:
+            examples.append(formatted)
+            if len(examples) >= subset_size:
+                break
+    return examples
 
 
 def load_math_dataset(
@@ -14,44 +76,8 @@ def load_math_dataset(
     subset_size: int = 2000,
     seed: int = 42,
 ) -> List[Dict[str, str]]:
-    """
-    Load and format the OpenR1-Math-220k dataset.
-
-    Args:
-        dataset_name: Name of the dataset on Hugging Face Hub
-        split: Dataset split to load (typically "train")
-        subset_size: Number of examples to sample
-        seed: Random seed for deterministic sampling
-
-    Returns:
-        List of formatted examples with keys: instruction, input, output
-    """
-    # Load the dataset
-    dataset = load_dataset(dataset_name, split=split)
-
-    # Deterministically sample subset
-    if subset_size < len(dataset):
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        selected_indices = indices[:subset_size]
-        dataset = dataset.select(selected_indices)
-
-    # Format examples
-    formatted_examples = []
-    for example in dataset:
-        # Extract question and answer from the dataset
-        # Based on OpenR1-Math-220k structure
-        question = example.get("problem", "")
-        answer = example.get("answer", "")
-
-        if question and answer:
-            formatted_examples.append({
-                "instruction": question,
-                "input": "",  # No separate input for math problems
-                "output": answer,
-            })
-
-    return formatted_examples
+    """Load and format a math dataset. Returns dicts with instruction/input/output."""
+    return _load_formatted(dataset_name, split, subset_size, seed)
 
 
 def load_math_dataset_with_validation(
@@ -61,51 +87,13 @@ def load_math_dataset_with_validation(
     validation_split: float = 0.1,
     seed: int = 42,
 ) -> tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    """
-    Load math dataset and split into train/validation sets.
+    """Load a math dataset and split it into (train_examples, validation_examples)."""
+    examples = _load_formatted(dataset_name, split, subset_size, seed)
 
-    Args:
-        dataset_name: Name of the dataset on Hugging Face Hub
-        split: Dataset split to load (typically "train")
-        subset_size: Total number of examples to sample
-        validation_split: Fraction of data to use for validation
-        seed: Random seed for deterministic sampling
+    val_size = int(len(examples) * validation_split)
+    if len(examples) > 1:
+        val_size = max(1, val_size)
+    train_size = len(examples) - val_size
 
-    Returns:
-        Tuple of (train_examples, validation_examples)
-    """
-    # Load the dataset
-    dataset = load_dataset(dataset_name, split=split)
-
-    # Deterministically sample subset
-    if subset_size < len(dataset):
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        selected_indices = indices[:subset_size]
-        dataset = dataset.select(selected_indices)
-
-    # Format examples
-    formatted_examples = []
-    for example in dataset:
-        question = example.get("problem", "")
-        answer = example.get("answer", "")
-
-        if question and answer:
-            formatted_examples.append({
-                "instruction": question,
-                "input": "",
-                "output": answer,
-            })
-
-    # Split into train/validation
-    val_size = int(len(formatted_examples) * validation_split)
-    train_size = len(formatted_examples) - val_size
-
-    # Deterministic shuffle for train/val split
-    indices = list(range(len(formatted_examples)))
-    random.Random(seed).shuffle(indices)
-
-    train_examples = [formatted_examples[i] for i in indices[:train_size]]
-    val_examples = [formatted_examples[i] for i in indices[train_size:]]
-
-    return train_examples, val_examples
+    # Examples are already in shuffled order, so a simple slice is deterministic.
+    return examples[:train_size], examples[train_size:]
