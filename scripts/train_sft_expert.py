@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Reusable script for training SFT experts with LoRA.
+Reusable script for training SFT experts with LoRA (patched version).
+
+Changes vs. the original:
+  1. Bespoke-Stratos `system` prompt is kept and used in the chat template.
+  2. Label masking: loss only on assistant tokens (prompt/system masked with -100).
+  3. Examples longer than max_length are DROPPED (not truncated), so the model
+     always sees the end-of-turn token and learns to stop.
+  4. Epoch-based training + early stopping instead of a fixed 100 steps.
+  5. Gradient checkpointing OFF by default; bf16 used when supported.
+  6. Dynamic padding via a data collator (no padding to 512 in the dataset).
 
 Usage:
-    python scripts/train_sft_expert.py --config <config_file> [--dry-run]
-
-Example:
-    python scripts/train_sft_expert.py --config configs/expert_math.yaml --dry-run
-    python scripts/train_sft_expert.py --config configs/expert_math.yaml
+    python scripts/train_sft_expert.py --config configs/expert_math.yaml [--dry-run] [--smoke-test]
 """
 
 import argparse
@@ -17,215 +22,198 @@ import sys
 import random
 import numpy as np
 
-# Import dataset loaders
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from data.math_dataset import load_math_dataset_with_validation
 from data.code_dataset import load_code_dataset_with_validation
 from data.instruction_dataset import load_instruction_dataset_with_validation
 
 
-def load_instruction_dataset_direct(dataset_name: str, split: str, subset_size: int,
-                                    validation_split: float, seed: int):
-    """Load Bespoke-Stratos-17k directly from its TRL-compatible schema.
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+def load_instruction_dataset_direct(dataset_name, split, subset_size,
+                                    validation_split, seed):
+    """Load Bespoke-Stratos-17k, KEEPING the system prompt.
 
-    The dataset contains `system`, `conversations`, and `messages` fields.
-    We use the user message as the instruction and the assistant message as
-    the target output.
+    Returns lists of dicts with keys: system, instruction, input, output.
     """
     from datasets import load_dataset
 
     dataset = load_dataset(dataset_name, split=split)
-
-    # Shuffle deterministically, then cap the requested number of examples.
     dataset = dataset.shuffle(seed=seed)
     selected_size = min(subset_size, len(dataset))
-    dataset = dataset.select(range(selected_size))
-
     if selected_size == 0:
         return [], []
+    dataset = dataset.select(range(selected_size))
 
-    # Create a deterministic 90/10 train/validation split.
-    split_dataset = dataset.train_test_split(
-        test_size=validation_split,
-        seed=seed,
-    )
+    split_dataset = dataset.train_test_split(test_size=validation_split, seed=seed)
 
     def convert(example):
-        messages = example.get("messages") or []
+        # Bespoke-Stratos stores the system prompt in a top-level `system` column.
+        system = example.get("system") or ""
+        instruction, output = "", ""
 
-        instruction = ""
-        output = ""
-
-        for message in messages:
+        for message in example.get("messages") or []:
             role = message.get("role", "")
             content = message.get("content", "")
-            if role == "user" and not instruction:
+            if role == "system" and not system:
+                system = content
+            elif role == "user" and not instruction:
                 instruction = content
             elif role == "assistant" and not output:
                 output = content
 
-        # Fallback to the older `conversations` representation if needed.
+        # Fallback to the older `conversations` schema.
         if not instruction or not output:
-            conversations = example.get("conversations") or []
-            for message in conversations:
+            for message in example.get("conversations") or []:
                 role = message.get("from", "")
                 content = message.get("value", "")
-                if role == "user" and not instruction:
+                if role in ("user", "human") and not instruction:
                     instruction = content
                 elif role in ("assistant", "gpt") and not output:
                     output = content
 
-        return {
-            "instruction": instruction,
-            "input": "",
-            "output": output,
-        }
+        return {"system": system, "instruction": instruction,
+                "input": "", "output": output}
 
-    train_examples = [
-        convert(example)
-        for example in split_dataset["train"]
-        if convert(example)["instruction"] and convert(example)["output"]
-    ]
-    val_examples = [
-        convert(example)
-        for example in split_dataset["test"]
-        if convert(example)["instruction"] and convert(example)["output"]
-    ]
+    def convert_all(ds):
+        converted = (convert(ex) for ex in ds)  # convert each example once
+        return [c for c in converted if c["instruction"] and c["output"]]
 
-    return train_examples, val_examples
+    return convert_all(split_dataset["train"]), convert_all(split_dataset["test"])
 
 
-def set_seed(seed: int):
-    """Set seed for reproducibility."""
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
 
 
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
+def load_config(config_path):
     with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+        return yaml.safe_load(f)
 
 
-def get_dataset_loader(expert_type: str):
-    """Return the appropriate dataset loader function."""
+def get_dataset_loader(expert_type):
     if expert_type == "math":
         return load_math_dataset_with_validation
     elif expert_type == "code":
         return load_code_dataset_with_validation
     elif expert_type == "instruction":
         return load_instruction_dataset_with_validation
-    else:
-        raise ValueError(f"Unknown expert type: {expert_type}")
+    raise ValueError(f"Unknown expert type: {expert_type}")
 
 
-def tokenize_example(example, tokenizer, max_length=512):
+def load_examples(expert_type, dataset_name, dataset_split, subset_size, seed):
+    if expert_type == "instruction":
+        return load_instruction_dataset_direct(
+            dataset_name=dataset_name, split=dataset_split,
+            subset_size=subset_size, validation_split=0.1, seed=seed)
+    loader = get_dataset_loader(expert_type)
+    return loader(dataset_name=dataset_name, split=dataset_split,
+                  subset_size=subset_size, validation_split=0.1, seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# Tokenization with label masking
+# ---------------------------------------------------------------------------
+def tokenize_example(example, tokenizer, max_length=1024):
+    """Tokenize one example. Loss is computed ONLY on the assistant response.
+
+    - system + user tokens  -> label = -100 (ignored by the loss)
+    - assistant tokens      -> label = token id (includes <|im_end|>)
+    - too long              -> returns None (dropped, never truncated)
     """
-    Tokenize one instruction/response pair.
-
-    Loss is computed only on assistant-response tokens.
-    User/prompt tokens and padding tokens are masked with -100.
-    """
-
     user_content = example["instruction"]
-    if example.get("input"):
-        user_content += " " + example["input"]
+    if example.get("input") and example["input"].strip():
+        user_content += "\n\n" + example["input"]
 
-    prompt_messages = [
-        {
-            "role": "user",
-            "content": user_content,
-        }
-    ]
+    messages = []
+    if example.get("system"):
+        messages.append({"role": "system", "content": example["system"]})
+    messages.append({"role": "user", "content": user_content})
 
-    full_messages = [
-        {
-            "role": "user",
-            "content": user_content,
-        },
-        {
-            "role": "assistant",
-            "content": example["output"],
-        },
-    ]
+    # Text up to and including "<|im_start|>assistant\n"
+    prompt_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True)
+    # Same prefix + response + "<|im_end|>\n"
+    full_text = tokenizer.apply_chat_template(
+        messages + [{"role": "assistant", "content": example["output"]}],
+        tokenize=False, add_generation_prompt=False)
 
-    # Prompt including the generation marker.
-    prompt_ids = tokenizer.apply_chat_template(
-        prompt_messages,
-        tokenize=True,
-        add_generation_prompt=True,
-    )
+    if not full_text.startswith(prompt_text):
+        return None  # template does not have the expected prefix structure
+    response_text = full_text[len(prompt_text):]
 
-    # Full prompt + assistant response.
-    full_ids = tokenizer.apply_chat_template(
-        full_messages,
-        tokenize=True,
-        add_generation_prompt=False,
-    )
+    # Tokenize the two parts separately so the boundary is always exact.
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+    response_ids = tokenizer(response_text, add_special_tokens=False)["input_ids"]
 
-    # Prevent examples where the prompt itself consumes the whole limit.
-    if len(prompt_ids) >= max_length:
-        return None
+    input_ids = prompt_ids + response_ids
+    if len(input_ids) > max_length:
+        return None  # DROP, do not truncate
 
-    # Truncate the complete sequence.
-    full_ids = full_ids[:max_length]
-
-    # If truncation removed all assistant tokens, reject the example.
-    if len(full_ids) <= len(prompt_ids):
-        return None
-
-    attention_mask = [1] * len(full_ids)
-
-    # Ignore prompt tokens.
-    labels = [-100] * len(prompt_ids)
-
-    # Train only on assistant tokens.
-    labels.extend(full_ids[len(prompt_ids):])
-
-    # Pad to fixed length.
-    padding_length = max_length - len(full_ids)
-
-    if padding_length > 0:
-        full_ids.extend([tokenizer.pad_token_id] * padding_length)
-        attention_mask.extend([0] * padding_length)
-        labels.extend([-100] * padding_length)
-
+    labels = [-100] * len(prompt_ids) + response_ids
     return {
-        "input_ids": full_ids,
-        "attention_mask": attention_mask,
+        "input_ids": input_ids,
+        "attention_mask": [1] * len(input_ids),
         "labels": labels,
     }
 
 
+def tokenize_dataset(examples, tokenizer, max_length, name="train"):
+    """Convert a list of raw example dicts into a tokenized HF Dataset."""
+    from datasets import Dataset
+
+    rows = []
+    for ex in examples:
+        row = tokenize_example(ex, tokenizer, max_length)
+        if row is not None:
+            rows.append(row)
+
+    dropped = len(examples) - len(rows)
+    print(f"[{name}] kept {len(rows)}/{len(examples)} examples "
+          f"({dropped} dropped for exceeding {max_length} tokens)")
+    if not rows:
+        raise RuntimeError(
+            f"[{name}] no examples fit in max_length={max_length}. "
+            f"Increase max_length or use a dataset with shorter outputs.")
+
+    # Sanity check: show what is actually trained on for the first example.
+    first = rows[0]
+    trained = [t for t, l in zip(first["input_ids"], first["labels"]) if l != -100]
+    print(f"[{name}] tokens total={len(first['input_ids'])}, "
+          f"tokens with loss={len(trained)}")
+    print(f"[{name}] loss text (first 200 chars): "
+          f"{tokenizer.decode(trained)[:200]!r}")
+
+    return Dataset.from_list(rows)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Train SFT expert with LoRA")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    parser.add_argument("--dry-run", action="store_true", help="Only load data and show examples, do not train")
-    parser.add_argument("--smoke-test", action="store_true", help="Run a quick smoke test with reduced dataset size and steps")
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
 
-    # Load config
     config = load_config(args.config)
     print(f"Loaded config from: {args.config}")
 
-    # Set seed
     seed = config.get('training', {}).get('seed', 42)
     set_seed(seed)
-    print(f"Set seed to: {seed}")
 
-    # Extract configuration
     model_config = config.get('model', {})
     dataset_config = config.get('dataset', {})
     lora_config = config.get('lora', {})
     training_config = config.get('training', {})
 
-    # Apply smoke-test settings if requested
     if args.smoke_test:
-        print("Running in smoke-test mode: reducing dataset size and training steps")
+        print("Running in smoke-test mode")
         dataset_config['subset_size'] = 100
-        training_config['max_steps'] = 20
-        # Also reduce logging and save frequency for smoke test
+        training_config['max_steps'] = 20          # overrides epochs
         training_config['logging_steps'] = 2
         training_config['save_steps'] = 5
         training_config['eval_steps'] = 5
@@ -234,8 +222,9 @@ def main():
     dataset_name = dataset_config.get('name')
     subset_size = dataset_config.get('subset_size', 2000)
     dataset_split = dataset_config.get('split', "train")
+    max_length = training_config.get('max_length', 1024)
 
-    # Determine expert type from config path or config content
+    # Determine expert type
     config_file = os.path.basename(args.config)
     if 'math' in config_file:
         expert_type = "math"
@@ -244,393 +233,185 @@ def main():
     elif 'instruction' in config_file:
         expert_type = "instruction"
     else:
-        # Try to infer from dataset name
-        if dataset_name and "math" in dataset_name.lower():
+        name = (dataset_name or "").lower()
+        if "math" in name:
             expert_type = "math"
-        elif dataset_name and ("mbpp" in dataset_name.lower() or "code" in dataset_name.lower()):
+        elif "mbpp" in name or "code" in name:
             expert_type = "code"
-        elif dataset_name and ("instruction" in dataset_name.lower() or "bespoke" in dataset_name.lower()):
+        elif "instruction" in name or "bespoke" in name:
             expert_type = "instruction"
         else:
-            raise ValueError("Could not determine expert type from config. Please ensure config file name contains math, code, or instruction.")
-
+            raise ValueError("Config file name must contain math, code, or instruction.")
     print(f"Expert type: {expert_type}")
 
+    # ------------------------------------------------------------------ dry run
     if args.dry_run:
-        # For dry-run, we only need to load the dataset and show examples
         print(f"Loading dataset: {dataset_name}")
-        if expert_type == "instruction":
-            # Bespoke-Stratos-17k has a conversations/messages schema, so
-            # load it directly instead of relying on the older generic loader.
-            train_examples, val_examples = load_instruction_dataset_direct(
-                dataset_name=dataset_name,
-                split=dataset_split,
-                subset_size=subset_size,
-                validation_split=0.1,
-                seed=seed,
-            )
-        else:
-            loader = get_dataset_loader(expert_type)
-            train_examples, val_examples = loader(
-                dataset_name=dataset_name,
-                split=dataset_split,
-                subset_size=subset_size,
-                validation_split=0.1,
-                seed=seed,
-            )
-
-        actual_total = len(train_examples) + len(val_examples)
-        print(
-            f"Requested up to {subset_size} examples; "
-            f"selected {actual_total} usable examples."
-        )
-        print(
-            f"Loaded {len(train_examples)} training examples and "
-            f"{len(val_examples)} validation examples."
-        )
-
-        print("\n=== DRY RUN ===")
-        print("Showing first 3 training examples:")
+        train_examples, val_examples = load_examples(
+            expert_type, dataset_name, dataset_split, subset_size, seed)
+        print(f"{len(train_examples)} train / {len(val_examples)} val examples")
         for i in range(min(3, len(train_examples))):
+            ex = train_examples[i]
             print(f"Example {i}:")
-            print(f"  Instruction: {train_examples[i]['instruction']}")
-            print(f"  Input: {train_examples[i]['input']}")
-            print(f"  Output: {train_examples[i]['output']}")
-            print()
-
-        print("Showing first 3 validation examples:")
-        for i in range(min(3, len(val_examples))):
-            print(f"Example {i}:")
-            print(f"  Instruction: {val_examples[i]['instruction']}")
-            print(f"  Input: {val_examples[i]['input']}")
-            print(f"  Output: {val_examples[i]['output']}")
-            print()
-
-        if len(train_examples) == 0 or len(val_examples) == 0:
-            print("\nDRY RUN FAILED: one or more splits contain zero usable examples.")
+            print(f"  System: {ex.get('system', '')[:200]}")
+            print(f"  Instruction: {ex['instruction'][:300]}")
+            print(f"  Output: {ex['output'][:300]}\n")
+        if not train_examples or not val_examples:
+            print("DRY RUN FAILED: empty split.")
             raise SystemExit(1)
-
-        print("\nDRY RUN PASSED: dataset contains usable train and validation examples.")
-        print("Dry run completed. Exiting.")
+        print("DRY RUN PASSED.")
         return
 
-    # If not dry-run, we need the heavy libraries
+    # ------------------------------------------------------------ heavy imports
     import torch
-    from datasets import Dataset
-    from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
+    from transformers import (AutoTokenizer, AutoModelForCausalLM, TrainingArguments,
+                              Trainer, DataCollatorForSeq2Seq, EarlyStoppingCallback)
     from peft import LoraConfig, get_peft_model
 
-    # Set seed for torch
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    # Load tokenizer and model
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     print("Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        # torch_dtype will be set by TrainingArguments if fp16 is enabled
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    if training_config.get("gradient_checkpointing", True):
+
+    use_grad_ckpt = bool(training_config.get("gradient_checkpointing", False))
+    if use_grad_ckpt:
         model.config.use_cache = False
 
-    # LoRA configuration
     lora_params = LoraConfig(
-        r=lora_config.get("r", 8),
+        r=lora_config.get("r", 16),
         lora_alpha=lora_config.get("lora_alpha", 32),
         target_modules=lora_config.get(
             "target_modules",
-            ["q_proj", "v_proj"],
-        ),
+            ["q_proj", "k_proj", "v_proj", "o_proj",
+             "gate_proj", "up_proj", "down_proj"]),
         lora_dropout=lora_config.get("lora_dropout", 0.05),
         bias=lora_config.get("bias", "none"),
         task_type=lora_config.get("task_type", "CAUSAL_LM"),
     )
-
-    # Prepare model for LoRA
     print("Applying LoRA...")
     model = get_peft_model(model, lora_params)
+    if use_grad_ckpt:
+        model.enable_input_require_grads()  # required for ckpt + frozen embeddings
     model.print_trainable_parameters()
 
-    # Load dataset
+    # ------------------------------------------------------------------ data
     print(f"Loading dataset: {dataset_name}")
-    if expert_type == "instruction":
-        train_examples, val_examples = load_instruction_dataset_direct(
-            dataset_name=dataset_name,
-            split=dataset_split,
-            subset_size=subset_size,
-            validation_split=0.1,
-            seed=seed,
-        )
-    else:
-        loader = get_dataset_loader(expert_type)
-        train_examples, val_examples = loader(
-            dataset_name=dataset_name,
-            split=dataset_split,
-            subset_size=subset_size,
-            validation_split=0.1,
-            seed=seed,
-        )
-
-    if len(train_examples) == 0 or len(val_examples) == 0:
+    train_examples, val_examples = load_examples(
+        expert_type, dataset_name, dataset_split, subset_size, seed)
+    if not train_examples or not val_examples:
         raise RuntimeError(
             f"Dataset loading failed: {len(train_examples)} train, "
-            f"{len(val_examples)} validation examples."
-        )
+            f"{len(val_examples)} val.")
+    print(f"Loaded {len(train_examples)} train / {len(val_examples)} val examples.")
 
-    actual_total = len(train_examples) + len(val_examples)
-    print(
-        f"Requested up to {subset_size} examples; "
-        f"selected {actual_total} usable examples."
-    )
-    print(
-        f"Loaded {len(train_examples)} training examples and "
-        f"{len(val_examples)} validation examples."
-    )
+    tokenized_train = tokenize_dataset(train_examples, tokenizer, max_length, "train")
+    tokenized_val = tokenize_dataset(val_examples, tokenizer, max_length, "val")
 
-    # Format examples
-    def format_example(example):
-        return {
-            "instruction": example["instruction"],
-            "input": example["input"],
-            "output": example["output"],
-        }
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer, padding=True, label_pad_token_id=-100, pad_to_multiple_of=8)
 
-
-    def format_examples(examples):
-        formatted = [format_example(ex) for ex in examples]
-        return Dataset.from_list(formatted)
-
-    train_dataset = format_examples(train_examples)
-    val_dataset = format_examples(val_examples)
-
-    def tokenize_dataset(dataset, tokenizer):
-
-        def tokenize_function(examples):
-            tokenized = tokenizer(
-                examples["text"],
-                padding="max_length",
-                truncation=True,
-                max_length=512,
-            )
-
-            labels = []
-
-            for input_ids, attention_mask in zip(
-                tokenized["input_ids"],
-                tokenized["attention_mask"]
-            ):
-                example_labels = [
-                    token if mask == 1 else -100
-                    for token, mask in zip(input_ids, attention_mask)
-                ]
-                labels.append(example_labels)
-
-            tokenized["labels"] = labels
-
-            return tokenized
-
-        # IMPORTANT: create the text column first
-        dataset = dataset.map(
-            lambda examples: {
-                "text": [
-                    tokenizer.apply_chat_template(
-                        [
-                            {
-                                "role": "user",
-                                "content": (
-                                    instruction
-                                    + (
-                                        "\n\n" + inp
-                                        if inp and inp.strip()
-                                        else ""
-                                    )
-                                ),
-                            },
-                            {
-                                "role": "assistant",
-                                "content": output,
-                            },
-                        ],
-                        tokenize=False,
-                        add_generation_prompt=False,
-                    )
-                    for instruction, inp, output in zip(
-                        examples["instruction"],
-                        examples["input"],
-                        examples["output"],
-                    )
-                ]
-            },
-            batched=True,
-        )
-
-        print("Columns before tokenization:", dataset.column_names)
-        print("Examples before tokenization:", len(dataset))
-
-        tokenized = dataset.map(
-            tokenize_function,
-            batched=True,
-            remove_columns=dataset.column_names,
-        )
-
-        print("Examples after tokenization:", len(tokenized))
-
-        if len(tokenized) == 0:
-            raise RuntimeError(
-                "Tokenization produced zero usable examples."
-            )
-
-        return tokenized
-
-    print("TRAIN DATASET COLUMNS:", train_dataset.column_names)
-    print("FIRST TRAIN EXAMPLE:", train_dataset[0])
-    
-    tokenized_train_dataset = tokenize_dataset(
-        train_dataset,
-        tokenizer,
-    )
-
-    tokenized_val_dataset = tokenize_dataset(
-        val_dataset,
-        tokenizer,
-    )
-
-    # Set up training arguments - UPDATED PER USER FEEDBACK
+    # -------------------------------------------------------------- training
     output_dir = training_config.get('output_dir', "./outputs")
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    # Calculate effective batch size with gradient accumulation
     per_device_batch = training_config.get('per_device_train_batch_size', 4)
     grad_accum = training_config.get('gradient_accumulation_steps', 2)
-    effective_batch = per_device_batch * grad_accum
+    print(f"Effective batch size: {per_device_batch} x {grad_accum} = "
+          f"{per_device_batch * grad_accum}")
 
-    print(f"Effective batch size: {per_device_batch} × {grad_accum} = {effective_batch}")
+    cuda = torch.cuda.is_available()
+    use_bf16 = cuda and torch.cuda.is_bf16_supported() and training_config.get("bf16", True)
+    use_fp16 = cuda and not use_bf16 and training_config.get("fp16", True)
+    print(f"Precision: {'bf16' if use_bf16 else 'fp16' if use_fp16 else 'fp32'}")
+
+    eval_steps = training_config.get("eval_steps", 50)
 
     training_args = TrainingArguments(
         output_dir=output_dir,
-
         per_device_train_batch_size=per_device_batch,
+        per_device_eval_batch_size=per_device_batch,
         gradient_accumulation_steps=grad_accum,
 
-        warmup_steps=training_config.get(
-            "warmup_steps",
-            10,
-        ),
+        # Epoch-based training. max_steps=-1 means "use num_train_epochs".
+        num_train_epochs=training_config.get("num_train_epochs", 2),
+        max_steps=training_config.get("max_steps", -1),
 
-        max_steps=training_config.get(
-            "max_steps",
-            100,
-        ),
+        learning_rate=float(training_config.get("learning_rate", 5.0e-5)),
+        lr_scheduler_type=training_config.get("lr_scheduler_type", "cosine"),
+        warmup_ratio=training_config.get("warmup_ratio", 0.05),
+        weight_decay=training_config.get("weight_decay", 0.01),
+        max_grad_norm=1.0,
 
-        learning_rate=float(
-            training_config.get(
-                "learning_rate",
-                1.0e-4,
-            )
-        ),
+        bf16=use_bf16,
+        fp16=use_fp16,
+        group_by_length=True,
 
-        fp16=training_config.get(
-            "fp16",
-            True,
-        ),
-
-        logging_steps=training_config.get(
-            "logging_steps",
-            5,
-        ),
-
+        logging_steps=training_config.get("logging_steps", 10),
         eval_strategy="steps",
-        eval_steps=training_config.get(
-            "eval_steps",
-            20,
-        ),
-
+        eval_steps=eval_steps,
         save_strategy="steps",
-        save_steps=training_config.get(
-            "save_steps",
-            20,
-        ),
-
-        report_to=training_config.get(
-            "report_to",
-            "none",
-        ),
-
-        seed=seed,
-
+        save_steps=training_config.get("save_steps", eval_steps),
+        save_total_limit=2,                     # keep only the 2 newest checkpoints
         load_best_model_at_end=True,
-
-        gradient_checkpointing=training_config.get(
-            "gradient_checkpointing",
-            True,
-        ),
-
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+
+        report_to=training_config.get("report_to", "none"),
+        seed=seed,
+
+        gradient_checkpointing=use_grad_ckpt,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if use_grad_ckpt else None,
     )
 
-    # Initialize the Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_train_dataset,
-        eval_dataset=tokenized_val_dataset,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(
+            early_stopping_patience=training_config.get("early_stopping_patience", 3))],
     )
 
-    # Train
     print("Starting training...")
     trainer.train()
 
-    # Save the LoRA adapter
-    print("Saving LoRA adapter...")
+    print("Saving LoRA adapter (best checkpoint by eval_loss)...")
     trainer.save_model(output_dir)
 
-    # Optional: Test generation with the fine-tuned model
+    # ------------------------------------------------------- quick generation
     print("Testing generation...")
+    model.config.use_cache = True
     model.eval()
-    # Use a sample from the validation set for testing
-    if len(val_examples) > 0:
-        test_example = val_examples[0]
-        test_instruction = test_example["instruction"]
-        test_input = test_example["input"]
-        full_prompt = test_instruction + (" " + test_input if test_input else "")
-        messages = [
-            {"role": "user", "content": full_prompt},
-        ]
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = tokenizer(text, return_tensors="pt").to(device)
+    ex = val_examples[0]
+    user_content = ex["instruction"]
+    if ex.get("input") and ex["input"].strip():
+        user_content += "\n\n" + ex["input"]
+    messages = []
+    if ex.get("system"):
+        messages.append({"role": "system", "content": ex["system"]})
+    messages.append({"role": "user", "content": user_content})
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=128,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-        prompt_length = inputs["input_ids"].shape[-1]
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(device)
 
-        generated_ids = outputs[0, prompt_length:]
-
-        response = tokenizer.decode(
-            generated_ids,
-            skip_special_tokens=True,
-        ).strip()
-        print(f"Prompt: {full_prompt}")
-        print(f"Response: {response}")
-
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, max_new_tokens=256, do_sample=False,
+            pad_token_id=tokenizer.pad_token_id)
+    response = tokenizer.decode(
+        outputs[0, inputs["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
+    print(f"Prompt: {user_content[:300]}")
+    print(f"Response: {response}")
     print("Training completed successfully!")
 
 
