@@ -62,7 +62,7 @@ def main():
     print(f"mean={lengths.mean():.0f}  median={np.median(lengths):.0f}  max={lengths.max()}")
     print("percentiles: " + "  ".join(f"p{p}={int(np.percentile(lengths, p))}" for p in (50, 75, 90, 95, 99)))
     print()
-    for t in sorted({512, 1024, 2048, args.limit}):
+    for t in sorted({512, 1024, 2048, 4096, 8192, 16384, 32768, args.limit}):
         over = int((lengths > t).sum())
         print(f"> {t:>5} tokens: {over:>5} / {n}  ({100 * over / n:.1f}%)  -> {n - over} would be kept")
 
